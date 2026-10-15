@@ -63,6 +63,7 @@ import (
 	"github.com/tikv/client-go/v2/metrics"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikvrpc"
+	clienttrace "github.com/tikv/client-go/v2/trace"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
 	"github.com/tikv/client-go/v2/util"
 	"github.com/tikv/client-go/v2/util/redact"
@@ -1739,6 +1740,14 @@ func (c *twoPhaseCommitter) cleanup(ctx context.Context) {
 
 // execute executes the two-phase commit protocol.
 func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
+	if clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
+		started := time.Now()
+		clienttrace.TraceEvent(ctx, clienttrace.CategoryTxn2PC, "2pc.execute.begin", zap.Uint64("start_ts", c.startTS))
+		defer func() {
+			clienttrace.TraceEvent(ctx, clienttrace.CategoryTxn2PC, "2pc.execute.end",
+				zap.Uint64("start_ts", c.startTS), zap.Duration("elapsed", time.Since(started)), zap.Bool("success", err == nil))
+		}()
+	}
 	c.minCommitTSMgr.elevateWriteAccess(twoPCAccess)
 	var binlogSkipped bool
 	defer func() {
@@ -1973,7 +1982,14 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 	} else {
 		start = time.Now()
 		logutil.Event(ctx, "start get commit ts")
+		if clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
+			clienttrace.TraceEvent(ctx, clienttrace.CategoryTxn2PC, "tso.commit.begin", zap.Uint64("start_ts", c.startTS))
+		}
 		commitTS, err = c.txn.GetTimestampForCommit(retry.NewBackofferWithVars(ctx, TsoMaxBackoff, c.txn.vars), c.txn.GetScope())
+		if clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
+			clienttrace.TraceEvent(ctx, clienttrace.CategoryTxn2PC, "tso.commit.end",
+				zap.Uint64("start_ts", c.startTS), zap.Duration("elapsed", time.Since(start)), zap.Bool("success", err == nil))
+		}
 		if err != nil {
 			logutil.Logger(ctx).Warn("2PC get commitTS failed",
 				zap.Error(err),

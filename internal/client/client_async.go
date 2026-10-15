@@ -82,6 +82,7 @@ func (c *RPCClient) SendRequestAsync(ctx context.Context, addr string, req *tikv
 		return
 	}
 
+	method := diagnosticRequestMethod(batchReq)
 	if err := encodeRequestCmd(batchReq); err != nil {
 		cb.Invoke(nil, err)
 		return
@@ -90,6 +91,7 @@ func (c *RPCClient) SendRequestAsync(ctx context.Context, addr string, req *tikv
 	var (
 		storeMetrics = connPool.getStoreMetrics(req.Context.GetPeer().GetStoreId())
 		entry        = &batchCommandsEntry{
+			diagnosticMethod:    method,
 			ctx:                 ctx,
 			req:                 batchReq,
 			cb:                  cb,
@@ -104,7 +106,9 @@ func (c *RPCClient) SendRequestAsync(ctx context.Context, addr string, req *tikv
 	)
 
 	// defer post actions
+	entry.traceStage("batch.enqueue", entry.reqArriveAt, 0, 0)
 	entry.cb.Inject(func(resp *tikvrpc.Response, err error) (*tikvrpc.Response, error) {
+		entry.traceStage("batch.caller.resume", time.Now(), 0, 0)
 		if stop != nil {
 			stop()
 		}

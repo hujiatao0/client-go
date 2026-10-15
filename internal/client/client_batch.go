@@ -148,7 +148,9 @@ type batchCommandsEntry struct {
 	cb  async.Callback[*tikvrpc.Response]
 	// requestID is assigned in the send loop before the entry is published to batched.
 	// Invariant: requestID > 0 means the entry has been assigned a concrete batch request ID.
-	requestID atomic.Uint64
+	requestID         atomic.Uint64
+	diagnosticEntryID atomic.Uint64
+	diagnosticMethod  string
 	// batchState is shared by all requests contained in the same BatchCommandsRequest.
 	// It is published atomically because timeout/metrics paths may observe an entry
 	// concurrently with the send loop assigning it a concrete send start.
@@ -176,6 +178,7 @@ type batchCommandsEntry struct {
 }
 
 type batchCommandsRequestState struct {
+	diagnosticStreamID uint64
 	// stream is the concrete batch stream selected for this batch request.
 	stream *batchCommandsStream
 	// batchSize is the number of requests in the batch.
@@ -467,6 +470,7 @@ func (b *batchCommandsBuilder) buildWithLimit(limit int64, collect func(id uint6
 				}
 			}
 			e.batchSelectedAfterReqArriveNS.Store(max(buildTime.Sub(e.reqArriveAt).Nanoseconds(), int64(1)))
+			e.traceStage("batch.selected", buildTime, 0, b.idAlloc+1)
 
 			b.idAlloc++
 			if collect != nil {
@@ -883,6 +887,7 @@ func (l *tryLock) unlockForRecreate() {
 }
 
 type batchCommandsStream struct {
+	diagnosticID uint64 // guarded by the same recreate/send lock as the stream
 	tikvpb.Tikv_BatchCommandsClient
 	forwardedHost string
 	connIdx       string
@@ -916,6 +921,10 @@ func (s *batchCommandsStream) recreate(conn *grpc.ClientConn) error {
 	}
 	if s.connIdx != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, batchConnIdxMetadataKey, s.connIdx)
+	}
+	s.diagnosticID = newDiagnosticStreamID()
+	if s.diagnosticID != 0 {
+		ctx = metadata.AppendToOutgoingContext(ctx, diagnosticStreamMetadataKey, strconv.FormatUint(s.diagnosticID, 10))
 	}
 	streamClient, err := tikvClient.BatchCommands(ctx)
 	if err != nil {
@@ -1012,12 +1021,14 @@ func (c *batchCommandsClient) send(forwardedHost string, grp *batchCommandsReque
 	client := c.stream(forwardedHost)
 	sendStartAt := time.Now()
 	grp.state.stream = client
+	grp.state.diagnosticStreamID = client.diagnosticID
 	grp.state.sendStartAt = sendStartAt
 	grp.req.ClientSendTimeNs = uint64(sendStartAt.UnixNano())
 	for i, requestID := range grp.req.RequestIds {
 		entry := grp.entries[i]
 		entry.batchState.Store(grp.state)
 		entry.requestID.Store(requestID)
+		entry.traceStage("batch.send.begin", sendStartAt, client.diagnosticID, requestID)
 		c.batched.Store(requestID, entry)
 		c.sent.Add(1)
 		c.metrics.trackedRequestCounter(entry.forwardedHost != "").Inc()
@@ -1038,6 +1049,12 @@ func (c *batchCommandsClient) send(forwardedHost string, grp *batchCommandsReque
 		return
 	}
 	grp.state.sentAfterSendStartNS.CompareAndSwap(0, max(time.Since(sendStartAt).Nanoseconds(), int64(1)))
+	if client.diagnosticID != 0 {
+		at := time.Now()
+		for _, entry := range grp.entries {
+			entry.traceStage("batch.send.end", at, client.diagnosticID, 0)
+		}
+	}
 }
 
 // `failPendingRequests` must be called in locked contexts in order to avoid double closing channels.
@@ -1286,6 +1303,7 @@ func (c *batchCommandsClient) batchRecvLoop(cfg config.TiKVClient, tikvTransport
 			}
 			completedRespCount.Inc()
 			entry := value.(*batchCommandsEntry)
+			entry.traceStage("batch.recv", respRecvTime, 0, requestID)
 			batchState := entry.batchState.Load()
 			batchState.firstRespAfterSendStartNS.CompareAndSwap(0, max(respRecvTime.Sub(batchState.sendStartAt).Nanoseconds(), int64(1)))
 			entry.recvAfterReqArriveNS.CompareAndSwap(0, max(respRecvTime.Sub(entry.reqArriveAt).Nanoseconds(), int64(1)))
@@ -1295,7 +1313,10 @@ func (c *batchCommandsClient) batchRecvLoop(cfg config.TiKVClient, tikvTransport
 			logutil.Eventf(entry.ctx, "receive %T response with other %d batched requests from %s", responses[i].GetCmd(), len(responses), c.target)
 			if atomic.LoadInt32(&entry.canceled) == 0 {
 				// Put the response only if the request is not canceled.
+				notifyAt := time.Now()
 				entry.response(responses[i])
+				entry.traceStage("batch.notify", notifyAt, 0, requestID)
+				entry.traceResponseDetails(responses[i])
 			} else {
 				batchedNS, _, _, recvNS := loadBatchRequestProgress(entry)
 				canceledEntryTailLat.Observe(float64(time.Duration(max(recvNS-batchedNS, int64(1)))) / 1e9)
@@ -1442,10 +1463,12 @@ func sendBatchRequest(
 	timeout time.Duration,
 	priority uint64,
 ) (_ *tikvrpc.Response, err error) {
+	method := diagnosticRequestMethod(req)
 	if err := encodeRequestCmd(req); err != nil {
 		return nil, err
 	}
 	entry := &batchCommandsEntry{
+		diagnosticMethod:    method,
 		ctx:                 ctx,
 		req:                 req,
 		res:                 make(chan *tikvpb.BatchCommandsResponse_Response, 1),
@@ -1456,6 +1479,7 @@ func sendBatchRequest(
 		pri:                 priority,
 		reqArriveAt:         time.Now(),
 	}
+	entry.traceStage("batch.enqueue", entry.reqArriveAt, 0, 0)
 	timer := time.NewTimer(timeout)
 	defer func() {
 		timer.Stop()
@@ -1477,6 +1501,7 @@ func sendBatchRequest(
 
 	select {
 	case res, ok := <-entry.res:
+		entry.traceStage("batch.caller.resume", time.Now(), 0, 0)
 		if !ok {
 			return nil, errors.WithStack(entry.err)
 		}
