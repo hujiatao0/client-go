@@ -68,3 +68,15 @@ func TestDiagnosticBatchKeepsIdentityAfterStreamRecreation(t *testing.T) {
 		require.Equal(t, events[0]["entry_id"], event["entry_id"])
 	}
 }
+
+func TestDiagnosticStreamIdentityExistsWhileCaptureIsOff(t *testing.T) {
+	previous := diagnosticEnabled.Swap(true)
+	clienttrace.SetIsCategoryEnabledFunc(func(clienttrace.Category) bool { return false })
+	t.Cleanup(func() {
+		diagnosticEnabled.Store(previous)
+		clienttrace.SetIsCategoryEnabledFunc(nil)
+	})
+	require.NotZero(t, newDiagnosticStreamID())
+	diagnosticEnabled.Store(false)
+	require.Zero(t, newDiagnosticStreamID())
+}

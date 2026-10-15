@@ -47,7 +47,9 @@ func diagnosticRequestMethod(req *tikvpb.BatchCommandsRequest_Request) string {
 // A stream nonce is shared with TiKV through initial metadata. Request IDs are
 // scoped to a stream, so a bare request ID is not a cross-process identity.
 func newDiagnosticStreamID() uint64 {
-	if !diagnosticEnabled.Load() || !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
+	// Configure identity even while runtime capture is off; otherwise enabling
+	// capture would require reconnecting and could move the stream to another CQ.
+	if !diagnosticEnabled.Load() {
 		return 0
 	}
 	return rand.Uint64() | 1
