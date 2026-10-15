@@ -1313,10 +1313,11 @@ func (c *batchCommandsClient) batchRecvLoop(cfg config.TiKVClient, tikvTransport
 			logutil.Eventf(entry.ctx, "receive %T response with other %d batched requests from %s", responses[i].GetCmd(), len(responses), c.target)
 			if atomic.LoadInt32(&entry.canceled) == 0 {
 				// Put the response only if the request is not canceled.
+				// Freeze details before publishing the protobuf to its caller.
+				entry.traceResponseDetails(responses[i])
 				notifyAt := time.Now()
 				entry.response(responses[i])
 				entry.traceStage("batch.notify", notifyAt, 0, requestID)
-				entry.traceResponseDetails(responses[i])
 			} else {
 				batchedNS, _, _, recvNS := loadBatchRequestProgress(entry)
 				canceledEntryTailLat.Observe(float64(time.Duration(max(recvNS-batchedNS, int64(1)))) / 1e9)

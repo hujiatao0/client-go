@@ -40,6 +40,7 @@ import (
 	errors2 "errors"
 	"math"
 	"math/rand"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,6 +74,9 @@ import (
 
 // If the duration of a single request exceeds the slowRequestThreshold, a warning log will be logged.
 const slowRequestThreshold = time.Minute
+
+// Keep the additional commit timing out of the default flight recorder.
+var diagnosticCommitTiming = os.Getenv("TIDB_CQ_TRACE_FILE") != ""
 
 type twoPhaseCommitAction interface {
 	handleSingleBatch(*twoPhaseCommitter, *retry.Backoffer, batchMutations) error
@@ -1740,7 +1744,7 @@ func (c *twoPhaseCommitter) cleanup(ctx context.Context) {
 
 // execute executes the two-phase commit protocol.
 func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
-	if clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
+	if diagnosticCommitTiming && clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
 		started := time.Now()
 		clienttrace.TraceEvent(ctx, clienttrace.CategoryTxn2PC, "2pc.execute.begin", zap.Uint64("start_ts", c.startTS))
 		defer func() {
@@ -1982,11 +1986,11 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 	} else {
 		start = time.Now()
 		logutil.Event(ctx, "start get commit ts")
-		if clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
+		if diagnosticCommitTiming && clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
 			clienttrace.TraceEvent(ctx, clienttrace.CategoryTxn2PC, "tso.commit.begin", zap.Uint64("start_ts", c.startTS))
 		}
 		commitTS, err = c.txn.GetTimestampForCommit(retry.NewBackofferWithVars(ctx, TsoMaxBackoff, c.txn.vars), c.txn.GetScope())
-		if clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
+		if diagnosticCommitTiming && clienttrace.IsCategoryEnabled(clienttrace.CategoryTxn2PC) {
 			clienttrace.TraceEvent(ctx, clienttrace.CategoryTxn2PC, "tso.commit.end",
 				zap.Uint64("start_ts", c.startTS), zap.Duration("elapsed", time.Since(start)), zap.Bool("success", err == nil))
 		}

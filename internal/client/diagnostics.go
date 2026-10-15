@@ -17,6 +17,7 @@ package client
 import (
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -29,9 +30,14 @@ import (
 const diagnosticStreamMetadataKey = "x-cq-trace-stream"
 
 var diagnosticEntrySequence atomic.Uint64
+var diagnosticEnabled atomic.Bool
+
+func init() {
+	diagnosticEnabled.Store(os.Getenv("TIDB_CQ_TRACE_FILE") != "")
+}
 
 func diagnosticRequestMethod(req *tikvpb.BatchCommandsRequest_Request) string {
-	if !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
+	if !diagnosticEnabled.Load() || !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
 		return ""
 	}
 	// Capture before encodeRequestCmd replaces the command with encoded bytes.
@@ -41,14 +47,14 @@ func diagnosticRequestMethod(req *tikvpb.BatchCommandsRequest_Request) string {
 // A stream nonce is shared with TiKV through initial metadata. Request IDs are
 // scoped to a stream, so a bare request ID is not a cross-process identity.
 func newDiagnosticStreamID() uint64 {
-	if !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
+	if !diagnosticEnabled.Load() || !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
 		return 0
 	}
 	return rand.Uint64() | 1
 }
 
 func (e *batchCommandsEntry) traceStage(name string, at time.Time, streamID, requestID uint64) {
-	if e.ctx == nil || !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
+	if e.ctx == nil || !diagnosticEnabled.Load() || !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
 		return
 	}
 	if e.diagnosticEntryID.Load() == 0 {
@@ -70,7 +76,7 @@ func (e *batchCommandsEntry) traceStage(name string, at time.Time, streamID, req
 }
 
 func (e *batchCommandsEntry) traceResponseDetails(response *tikvpb.BatchCommandsResponse_Response) {
-	if e.ctx == nil || !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
+	if e.ctx == nil || !diagnosticEnabled.Load() || !clienttrace.IsCategoryEnabled(clienttrace.CategoryKVRequest) {
 		return
 	}
 	rpc, err := tikvrpc.FromBatchCommandsResponse(response)

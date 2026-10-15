@@ -27,8 +27,10 @@ import (
 )
 
 func TestDiagnosticBatchKeepsIdentityAfterStreamRecreation(t *testing.T) {
+	previous := diagnosticEnabled.Swap(true)
 	clienttrace.SetIsCategoryEnabledFunc(func(category clienttrace.Category) bool { return category == clienttrace.CategoryKVRequest })
 	t.Cleanup(func() {
+		diagnosticEnabled.Store(previous)
 		clienttrace.SetIsCategoryEnabledFunc(nil)
 		clienttrace.SetTraceEventFunc(nil)
 	})
